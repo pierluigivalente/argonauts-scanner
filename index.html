@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Argonauts 3-Trait Scanner</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:900px;margin:28px auto;padding:0 18px;color:#18202a}
+button{font-size:16px;padding:10px 16px;margin:4px 8px 8px 0}
+progress{width:100%;height:20px;margin:10px 0}
+#status{font-weight:700}.ok{color:#087a32}.warn{color:#9a5a00}.bad{color:#b00020}
+pre{white-space:pre-wrap;word-break:break-word;background:#f3f4f6;padding:14px;min-height:140px;border-radius:6px}
+small{color:#555}
+</style>
+</head>
+<body>
+<h1>Argonauts 3-Trait Scanner</h1>
+<p><b>Exactly 3 of:</b> Bones, Crown, Palette, Print<br><b>Must not have:</b> Artifact, Cloak, Relic, Sight</p>
+<button id="start">Start / Resume</button><button id="pause">Pause</button><button id="reset">Reset</button><button id="csv" disabled>Download CSV</button>
+<p id="status">Ready.</p>
+<progress id="bar" value="0" max="10000"></progress>
+<pre id="log">Ready. Progress is saved locally so you can resume.</pre>
+<small>Read-only blockchain calls. No wallet, signature or transaction required.</small>
+<script>
+(()=>{
+'use strict';
+const CONTRACT='0x387c41b0b2f1128de44db1bcf8baad085f26392c';
+const SELECTOR='0x5efab6e4';
+const MAX=10000;
+const KEY='argonauts_scan_v7';
+const RPCS=['https://ethereum-rpc.publicnode.com','https://eth.drpc.org','https://1rpc.io/eth'];
+const KNOWN=[2,8,0,1,5,0,4];
+let state={next:1,matches:[],rpc:0,paused:false};
+try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.next)state={...state,...s}}catch(e){}
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function save(){localStorage.setItem(KEY,JSON.stringify(state))}
+function data(id){return SELECTOR+BigInt(id).toString(16).padStart(64,'0')}
+function setStatus(t,c=''){const e=$('status');e.textContent=t;e.className=c}
+function log(t){$('log').textContent=t}
+function decode(raw){
+ if(!raw||raw==='0x')return null;
+ const h=raw.slice(2);
+ if(h.length!==448)return null;
+ const a=[];
+ for(let i=0;i<7;i++)a.push(Number(BigInt('0x'+h.slice(i*64,(i+1)*64))));
+ return a;
+}
+async function rpcCall(ep,hex){
+ const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),12000);
+ try{
+  const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_call',
+   params:[{to:CONTRACT,data:hex},'latest']}),signal:ctl.signal});
+  if(!r.ok)throw Error('HTTP '+r.status);
+  const j=await r.json();
+  if(j.error)throw Error(j.error.message||'RPC error');
+  return j.result;
+ }finally{clearTimeout(tm)}
+}
+async function read(id){
+ let err='';
+ for(let n=0;n<RPCS.length;n++){
+  const idx=(state.rpc+n)%RPCS.length;
+  try{
+   const t=decode(await rpcCall(RPCS[idx],data(id)));
+   if(!t)throw Error('Unexpected result length');
+   state.rpc=idx;
+   return t;
+  }catch(e){err+=RPCS[idx]+': '+e.message+'\n';await sleep(250)}
+ }
+ throw Error('RPC failed for token '+id+'\n'+err);
+}
+function match(t){
+ if(!t||t.length!==7)return false;
+ if(t[0]||t[2]||t[6])return false;
+ return [1,3,4,5].filter(i=>t[i]!==0).length===3;
+}
+async function verify(){
+ const results=[];
+ for(let i=0;i<RPCS.length;i++){
+  try{
+   const t=decode(await rpcCall(RPCS[i],data(1)));
+   results.push(RPCS[i]+' -> '+JSON.stringify(t));
+   if(JSON.stringify(t)===JSON.stringify(KNOWN)){state.rpc=i;save();return results}
+  }catch(e){results.push(RPCS[i]+' -> ERROR '+e.message)}
+ }
+ throw Error('No RPC returned the verified token #1 result.\n'+results.join('\n'));
+}
+$('start').onclick=async()=>{
+ state.paused=false;$('start').disabled=true;$('csv').disabled=true;
+ try{
+  setStatus('Verifying...','warn');
+  const v=await verify();
+  log('Verified.\n'+v.join('\n')+'\n\nStarting from token '+state.next+'...');
+  while(state.next<=MAX&&!state.paused){
+   const id=state.next,t=await read(id);
+   if(match(t)&&!state.matches.includes(id))state.matches.push(id);
+   state.next=id+1;save();$('bar').value=id;
+   setStatus('Scanning '+id+'/'+MAX+' - matches: '+state.matches.length,'ok');
+   if(id%100===0)log('Running...\nToken '+id+'/'+MAX+'\nMatches '+state.matches.length+'\n\nProgress saved automatically.');
+   await sleep(150);
+  }
+  if(state.paused){
+   setStatus('Paused at '+(state.next-1),'warn');
+   log('Paused. Next token: '+state.next+'\nMatches: '+state.matches.length);
+  }else{
+   $('csv').disabled=false;
+   setStatus('DONE - '+state.matches.length+' matches','ok');
+   log('DONE\n\n'+state.matches.join(', '));
+  }
+ }catch(e){
+  setStatus('ERROR - '+String(e.message).split('\n')[0],'bad');
+  log(String(e.message)+'\n\nProgress saved; press Start / Resume to retry.');
+ }finally{$('start').disabled=false}
+};
+$('pause').onclick=()=>{state.paused=true;save()};
+$('reset').onclick=()=>{
+ if(confirm('Reset scan progress?')){
+  state={next:1,matches:[],rpc:0,paused:false};
+  localStorage.removeItem(KEY);$('bar').value=0;$('csv').disabled=true;
+  setStatus('Reset');log('Ready.');
+ }
+};
+$('csv').onclick=()=>{
+ const rows=['token_id',...state.matches];
+ const b=new Blob([rows.join('\n')],{type:'text/csv'});
+ const u=URL.createObjectURL(b),a=document.createElement('a');
+ a.href=u;a.download='argonauts_3_traits.csv';a.click();
+ setTimeout(()=>URL.revokeObjectURL(u),1000);
+};
+$('bar').value=Math.min(MAX,state.next-1);
+if(state.next>1)setStatus('Saved progress: '+(state.next-1)+'/'+MAX+'. Click Start / Resume.');
+})();
+</script>
+</body>
+</html>
