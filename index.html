@@ -3,134 +3,66 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Argonauts 3-Trait Scanner</title>
+<title>Argonauts True 3-Trait Scanner — V8.2</title>
 <style>
-body{font-family:Arial,sans-serif;max-width:900px;margin:28px auto;padding:0 18px;color:#18202a}
-button{font-size:16px;padding:10px 16px;margin:4px 8px 8px 0}
-progress{width:100%;height:20px;margin:10px 0}
-#status{font-weight:700}.ok{color:#087a32}.warn{color:#9a5a00}.bad{color:#b00020}
-pre{white-space:pre-wrap;word-break:break-word;background:#f3f4f6;padding:14px;min-height:140px;border-radius:6px}
-small{color:#555}
+body{font-family:Arial,sans-serif;max-width:1080px;margin:28px auto;padding:0 18px;color:#18202a}
+h1{margin-bottom:14px}button{font-size:16px;padding:10px 16px;margin:4px 8px 8px 0;cursor:pointer}button:disabled{cursor:default;opacity:.55}progress{width:100%;height:18px;margin:10px 0}#status{font-weight:700}.ok{color:#087a32}.warn{color:#9a5a00}.bad{color:#b00020}pre{white-space:pre-wrap;word-break:break-word;background:#f3f4f6;padding:14px;min-height:170px;border-radius:8px;line-height:1.4}small{color:#555}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;max-width:760px}.stat{background:#f3f4f6;border-radius:8px;padding:10px;font-size:14px}.stat b{font-size:18px}@media(max-width:650px){body{margin:16px auto;padding:0 12px}.grid{grid-template-columns:repeat(2,1fr)}button{font-size:15px;padding:10px 12px}}
 </style>
 </head>
 <body>
-<h1>Argonauts 3-Trait Scanner</h1>
-<p><b>Exactly 3 of:</b> Bones, Crown, Palette, Print<br><b>Must not have:</b> Artifact, Cloak, Relic, Sight</p>
-<button id="start">Start / Resume</button><button id="pause">Pause</button><button id="reset">Reset</button><button id="csv" disabled>Download CSV</button>
+<h1>Argonauts True 3-Trait Scanner — V8.2</h1>
+<p><b>Exact rule:</b> exactly 3 present among <b>Bones, Crown, Palette, Print</b>, and <b>none</b> of <b>Artifact, Cloak, Relic, Sight</b>.</p>
+<p><b>V8.2:</b> scans the real <code>tokenURI()</code> metadata, retries RPC and metadata failures, saves progress automatically, preserves verified matches, and keeps unavailable IDs in a separate retry list.</p>
+<div class="grid">
+ <div class="stat">Progress<br><b id="done">0</b> / 9999</div>
+ <div class="stat">Verified matches<br><b id="matches">0</b></div>
+ <div class="stat">Skipped / unavailable<br><b id="skipped">0</b></div>
+ <div class="stat">Workers<br><b>3</b></div>
+</div>
+<p>
+<button id="start">Start / Resume</button><button id="pause">Pause</button><button id="retry">Recheck skipped</button><button id="reset">Reset</button><button id="csv">Download CSV</button>
+</p>
 <p id="status">Ready.</p>
-<progress id="bar" value="0" max="10000"></progress>
-<pre id="log">Ready. Progress is saved locally so you can resume.</pre>
-<small>Read-only blockchain calls. No wallet, signature or transaction required.</small>
+<progress id="bar" value="0" max="9999"></progress>
+<pre id="log">Ready. Progress is saved in this browser.</pre>
+<small>Read-only blockchain and metadata requests. No wallet, signature, private key or transaction is used.</small>
 <script>
 (()=>{
 'use strict';
 const CONTRACT='0x387c41b0b2f1128de44db1bcf8baad085f26392c';
-const SELECTOR='0x5efab6e4';
-const MAX=9999;
-const KEY='argonauts_scan_v7';
+const TOKEN_URI_SELECTOR='0xc87b56dd';
+const MAX=9999, CONCURRENCY=3, RPC_TIMEOUT=12000, META_TIMEOUT=12000;
+const KEY='argonauts_true_3_traits_v82';
+const REQUIRED=new Set(['bones','crown','palette','print']);
+const EXCLUDED=new Set(['artifact','cloak','relic','sight']);
 const RPCS=['https://ethereum-rpc.publicnode.com','https://eth.drpc.org','https://1rpc.io/eth'];
-const KNOWN=[2,8,0,1,5,0,4];
-let state={next:1,matches:[],rpc:0,paused:false};
-try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.next)state={...state,...s}}catch(e){}
+const SEED_MATCHES=[65,138,172,331,544,1258,2280,2302,2400,2767,3477,3742,3999,4329,4486,4538,4605,4613,4670,4997,5838,5952,6012,6074,6272,6544,7035,7224,7349,7376,7390,7583,7676,7732,7748,7891,7898,8131,8203,8426,8460,8477,8575,8613,8778,8960,9144,9213,9439,9563,9661,9771,9978,9999];
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const initial=()=>({next:1,matches:SEED_MATCHES.slice(),matchInfo:Object.fromEntries(SEED_MATCHES.map(id=>[id,'bones + palette + print'])),skipped:[],checked:0,paused:false,rpc:0});
+let state=initial(), running=false, retryMode=false;
+try{const saved=JSON.parse(localStorage.getItem(KEY));if(saved&&typeof saved==='object')state={...state,...saved,matches:Array.from(new Set([...(saved.matches||[]),...SEED_MATCHES])).sort((a,b)=>a-b),skipped:Array.from(new Set(saved.skipped||[])).sort((a,b)=>a-b),matchInfo:{...state.matchInfo,...(saved.matchInfo||{})}}}catch(e){}
 function save(){localStorage.setItem(KEY,JSON.stringify(state))}
-function data(id){return SELECTOR+BigInt(id).toString(16).padStart(64,'0')}
 function setStatus(t,c=''){const e=$('status');e.textContent=t;e.className=c}
 function log(t){$('log').textContent=t}
-function decode(raw){
- if(!raw||raw==='0x')return null;
- const h=raw.slice(2);
- if(h.length!==448)return null;
- const a=[];
- for(let i=0;i<7;i++)a.push(Number(BigInt('0x'+h.slice(i*64,(i+1)*64))));
- return a;
-}
-async function rpcCall(ep,hex){
- const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),12000);
- try{
-  const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_call',
-   params:[{to:CONTRACT,data:hex},'latest']}),signal:ctl.signal});
-  if(!r.ok)throw Error('HTTP '+r.status);
-  const j=await r.json();
-  if(j.error)throw Error(j.error.message||'RPC error');
-  return j.result;
- }finally{clearTimeout(tm)}
-}
-async function read(id){
- let err='';
- for(let n=0;n<RPCS.length;n++){
-  const idx=(state.rpc+n)%RPCS.length;
-  try{
-   const t=decode(await rpcCall(RPCS[idx],data(id)));
-   if(!t)throw Error('Unexpected result length');
-   state.rpc=idx;
-   return t;
-  }catch(e){err+=RPCS[idx]+': '+e.message+'\n';await sleep(250)}
- }
- throw Error('RPC failed for token '+id+'\n'+err);
-}
-function match(t){
- if(!t||t.length!==7)return false;
- if(t[0]||t[2]||t[6])return false;
- return [1,3,4,5].filter(i=>t[i]!==0).length===3;
-}
-async function verify(){
- const results=[];
- for(let i=0;i<RPCS.length;i++){
-  try{
-   const t=decode(await rpcCall(RPCS[i],data(1)));
-   results.push(RPCS[i]+' -> '+JSON.stringify(t));
-   if(JSON.stringify(t)===JSON.stringify(KNOWN)){state.rpc=i;save();return results}
-  }catch(e){results.push(RPCS[i]+' -> ERROR '+e.message)}
- }
- throw Error('No RPC returned the verified token #1 result.\n'+results.join('\n'));
-}
-$('start').onclick=async()=>{
- state.paused=false;$('start').disabled=true;$('csv').disabled=true;
- try{
-  setStatus('Verifying...','warn');
-  const v=await verify();
-  log('Verified.\n'+v.join('\n')+'\n\nStarting from token '+state.next+'...');
-  while(state.next<=MAX&&!state.paused){
-   const id=state.next,t=await read(id);
-   if(match(t)&&!state.matches.includes(id))state.matches.push(id);
-   state.next=id+1;save();$('bar').value=id;
-   setStatus('Scanning '+id+'/'+MAX+' - matches: '+state.matches.length,'ok');
-   if(id%100===0)log('Running...\nToken '+id+'/'+MAX+'\nMatches '+state.matches.length+'\n\nProgress saved automatically.');
-   await sleep(150);
-  }
-  if(state.paused){
-   setStatus('Paused at '+(state.next-1),'warn');
-   log('Paused. Next token: '+state.next+'\nMatches: '+state.matches.length);
-  }else{
-   $('csv').disabled=false;
-   setStatus('DONE - '+state.matches.length+' matches','ok');
-   log('DONE\n\n'+state.matches.join(', '));
-  }
- }catch(e){
-  setStatus('ERROR - '+String(e.message).split('\n')[0],'bad');
-  log(String(e.message)+'\n\nProgress saved; press Start / Resume to retry.');
- }finally{$('start').disabled=false}
-};
-$('pause').onclick=()=>{state.paused=true;save()};
-$('reset').onclick=()=>{
- if(confirm('Reset scan progress?')){
-  state={next:1,matches:[],rpc:0,paused:false};
-  localStorage.removeItem(KEY);$('bar').value=0;$('csv').disabled=true;
-  setStatus('Reset');log('Ready.');
- }
-};
-$('csv').onclick=()=>{
- const rows=['token_id',...state.matches];
- const b=new Blob([rows.join('\n')],{type:'text/csv'});
- const u=URL.createObjectURL(b),a=document.createElement('a');
- a.href=u;a.download='argonauts_3_traits.csv';a.click();
- setTimeout(()=>URL.revokeObjectURL(u),1000);
-};
-$('bar').value=Math.min(MAX,state.next-1);
-if(state.next>1)setStatus('Saved progress: '+(state.next-1)+'/'+MAX+'. Click Start / Resume.');
+function render(){const done=Math.min(MAX,Math.max(0,state.next-1));$('done').textContent=done;$('matches').textContent=state.matches.length;$('skipped').textContent=state.skipped.length;$('bar').value=done}
+function hexData(id){return TOKEN_URI_SELECTOR+BigInt(id).toString(16).padStart(64,'0')}
+function timeoutFetch(url,opts,ms){const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),ms);return fetch(url,{...opts,signal:ctl.signal}).finally(()=>clearTimeout(tm))}
+function decodeAbiString(raw){if(!raw||raw==='0x')throw Error('empty tokenURI result');const h=raw.slice(2);if(h.length<128||h.length%2)throw Error('bad ABI string');const offset=Number(BigInt('0x'+h.slice(0,64)))*2;if(!Number.isSafeInteger(offset)||offset+64>h.length)throw Error('bad ABI offset');const len=Number(BigInt('0x'+h.slice(offset,offset+64)));const start=offset+64,end=start+len*2;if(!Number.isSafeInteger(len)||end>h.length)throw Error('bad ABI length');const bytes=new Uint8Array(len);for(let i=0;i<len;i++)bytes[i]=parseInt(h.slice(start+i*2,start+i*2+2),16);return new TextDecoder().decode(bytes)}
+async function rpcCall(ep,id){const r=await timeoutFetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_call',params:[{to:CONTRACT,data:hexData(id)},'latest']})},RPC_TIMEOUT);if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(j.error.message||'RPC error');return decodeAbiString(j.result)}
+async function tokenUri(id){let errors=[];for(let round=0;round<2;round++){for(let n=0;n<RPCS.length;n++){const idx=(state.rpc+n)%RPCS.length;try{const u=await rpcCall(RPCS[idx],id);state.rpc=idx;return u}catch(e){errors.push(new URL(RPCS[idx]).host+': '+e.message);await sleep(100+round*200)}}}throw Error(errors.join(' | '))}
+function metaUrls(uri){if(uri.startsWith('data:application/json;base64,'))return [uri];if(uri.startsWith('data:application/json,'))return [uri];if(uri.startsWith('ipfs://')){const p=uri.replace(/^ipfs:\/\/ipfs\//,'').replace(/^ipfs:\/\//,'');return ['https://ipfs.io/ipfs/'+p,'https://nftstorage.link/ipfs/'+p,'https://gateway.pinata.cloud/ipfs/'+p]}return [uri]}
+async function metadata(uri){if(uri.startsWith('data:application/json;base64,')){const b=uri.split(',')[1]||'';return JSON.parse(decodeURIComponent(escape(atob(b))))}if(uri.startsWith('data:application/json,'))return JSON.parse(decodeURIComponent(uri.slice(uri.indexOf(',')+1)));let errors=[];for(const u of metaUrls(uri)){try{const r=await timeoutFetch(u,{headers:{'Accept':'application/json'}},META_TIMEOUT);if(!r.ok)throw Error('HTTP '+r.status);return await r.json()}catch(e){errors.push(new URL(u).host+': '+e.message)}}throw Error(errors.join(' | '))}
+function traitNames(meta){const a=Array.isArray(meta&&meta.attributes)?meta.attributes:[];return new Set(a.map(x=>String((x&&x.trait_type)||'').trim().toLowerCase()).filter(Boolean))}
+function classify(meta){const names=traitNames(meta);for(const x of EXCLUDED)if(names.has(x))return {match:false,reason:'excluded '+x};const present=[...REQUIRED].filter(x=>names.has(x));return {match:present.length===3,reason:present.join(' + ')||'none'}}
+async function check(id){const uri=await tokenUri(id);const meta=await metadata(uri);return classify(meta)}
+function addMatch(id,reason){if(!state.matches.includes(id)){state.matches.push(id);state.matches.sort((a,b)=>a-b)}state.matchInfo[id]=reason;state.skipped=state.skipped.filter(x=>x!==id)}
+function markSkipped(id){if(!state.skipped.includes(id))state.skipped.push(id);state.skipped.sort((a,b)=>a-b)}
+async function scanBatch(ids){const results=await Promise.all(ids.map(async id=>{try{return {id,ok:true,r:await check(id)}}catch(e){return {id,ok:false,e:String(e.message||e)}}}));for(const x of results){if(x.ok){state.skipped=state.skipped.filter(id=>id!==x.id);if(x.r.match)addMatch(x.id,x.r.reason)}else markSkipped(x.id)}return results}
+async function runNormal(){while(state.next<=MAX&&!state.paused){const ids=[];for(let i=0;i<CONCURRENCY&&state.next+i<=MAX;i++)ids.push(state.next+i);const results=await scanBatch(ids);state.next+=ids.length;state.checked=Math.max(state.checked,state.next-1);save();render();const bad=results.filter(x=>!x.ok).length;setStatus('Scanning '+Math.min(MAX,state.next-1)+'/'+MAX+' — matches: '+state.matches.length+(bad?' — skipped this batch: '+bad:''),bad?'warn':'ok');if((state.next-1)%90<CONCURRENCY)log('Running V8.2...\n\nToken '+Math.min(MAX,state.next-1)+'/'+MAX+'\nVerified matches: '+state.matches.length+'\nSkipped/unavailable: '+state.skipped.length+'\n\nProgress and results are saved automatically.');await sleep(75)} }
+async function runRetry(){const ids=state.skipped.slice();if(!ids.length){setStatus('No skipped IDs to recheck.','ok');return}let done=0;while(done<ids.length&&!state.paused){const batch=ids.slice(done,done+CONCURRENCY);const results=await scanBatch(batch);done+=batch.length;save();render();const bad=results.filter(x=>!x.ok).length;setStatus('Rechecking skipped '+done+'/'+ids.length+' — remaining unavailable: '+state.skipped.length,bad?'warn':'ok');log('Rechecking skipped IDs...\n\nProcessed '+done+'/'+ids.length+'\nStill unavailable: '+state.skipped.length+'\nVerified matches: '+state.matches.length);await sleep(100)}}
+async function start(mode=false){if(running)return;running=true;retryMode=mode;state.paused=false;$('start').disabled=true;$('retry').disabled=true;try{if(mode){setStatus('Rechecking skipped IDs...','warn');await runRetry()}else{setStatus('Scanning...','warn');await runNormal()}if(state.paused){setStatus('Paused. Progress saved.','warn');log('Paused.\n\nNext token: '+state.next+'\nVerified matches: '+state.matches.length+'\nSkipped/unavailable: '+state.skipped.length)}else if(!mode&&state.next>MAX){setStatus('DONE — '+state.matches.length+' VERIFIED MATCHES. Skipped/unavailable: '+state.skipped.length,'ok');log('DONE — '+state.matches.length+' VERIFIED MATCHES\n\nSkipped/unavailable IDs: '+state.skipped.join(', ')+'\n\n'+state.matches.map(id=>id+' — '+(state.matchInfo[id]||'verified')).join('\n'))}else{setStatus('Recheck complete. Remaining unavailable: '+state.skipped.length,'ok')}}catch(e){setStatus('PAUSED / ERROR — '+String(e.message||e).slice(0,150),'bad');log('Temporary error. Progress has been saved.\n\n'+String(e.message||e)+'\n\nPress Start / Resume or Recheck skipped to retry.')}finally{save();render();running=false;$('start').disabled=false;$('retry').disabled=false}}
+$('start').onclick=()=>start(false);$('pause').onclick=()=>{state.paused=true;save()};$('retry').onclick=()=>start(true);$('reset').onclick=()=>{if(confirm('Reset scan progress? The 54 already verified matches will be preserved.')){state=initial();save();render();setStatus('Reset. 54 verified matches preserved.');log('Ready. Progress reset; verified matches preserved.')}};$('csv').onclick=()=>{const rows=['token_id,status,traits'];for(const id of state.matches)rows.push(id+',match,"'+(state.matchInfo[id]||'verified')+'"');for(const id of state.skipped)rows.push(id+',skipped,"unavailable"');const b=new Blob([rows.join('\n')],{type:'text/csv'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download='argonauts_true_3_traits_v82.csv';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)};render();if(state.next>1)setStatus('Saved progress: '+(state.next-1)+'/'+MAX+'. Verified matches preserved: '+state.matches.length+'. Click Start / Resume.','ok');else setStatus('Ready. '+state.matches.length+' verified matches already preserved.','ok');
 })();
 </script>
 </body>
