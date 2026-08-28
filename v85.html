@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Argonauts Trait Scanner — V8.5</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:1180px;margin:28px auto;padding:0 18px;color:#18202a}h1{margin-bottom:8px}button,select{font-size:16px;padding:10px 16px;margin:4px 8px 8px 0;cursor:pointer}button:disabled{cursor:default;opacity:.55}progress{width:100%;height:18px;margin:10px 0}#status{font-weight:700}.ok{color:#087a32}.warn{color:#9a5a00}.bad{color:#b00020}pre{white-space:pre-wrap;word-break:break-word;background:#f3f4f6;padding:14px;min-height:180px;border-radius:8px;line-height:1.4}.grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:14px 0}.stat,.panel{background:#f3f4f6;border-radius:8px;padding:10px}.panel{border:1px solid #ddd;background:#fafafa;margin:12px 0}.stat b{font-size:18px}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}@media(max-width:760px){body{margin:16px auto;padding:0 12px}.grid{grid-template-columns:repeat(2,1fr)}button,select{font-size:15px;padding:10px 12px}}
+</style>
+</head>
+<body>
+<h1>Argonauts Trait Scanner — V8.5</h1>
+<p><b>True 3-trait:</b> exactly 3 among <b>Bones, Crown, Palette, Print</b>, with <b>Artifact, Cloak, Relic, Sight</b> absent.</p>
+<p><b>4-trait + Relic:</b> exactly 3 among <b>Bones, Crown, Palette, Print</b>, with <b>Relic</b> present and <b>Artifact, Cloak, Sight</b> absent.</p>
+<div class="panel"><b>V8.5 correction:</b> V8.4 had a regression: its provisional 7-slot <code>traitsOf()</code> pre-filter was allowed to <b>delete previously verified matches</b>. That is why a completed scan could show 0 matches. V8.5 keeps the 54 legacy verified 3-trait IDs permanently preserved and never uses an unproven slot map to remove them. New verification uses each token's metadata and checks the actual trait names.</div>
+<div class="row"><label><b>Results:</b></label><select id="view"><option value="three">True 3-trait only</option><option value="four">4-trait + Relic only</option><option value="both">Both</option></select></div>
+<div class="grid">
+<div class="stat">Progress<br><b id="done">0</b> / 9999</div>
+<div class="stat">Legacy verified 3-trait<br><b id="legacy">54</b></div>
+<div class="stat">3-trait total<br><b id="three">54</b></div>
+<div class="stat">4-trait + Relic<br><b id="four">0</b></div>
+<div class="stat">Skipped / unavailable<br><b id="skipped">0</b></div>
+<div class="stat">Workers<br><b>3</b></div>
+</div>
+<p><button id="start">Start / Resume full scan</button><button id="pause">Pause</button><button id="retry">Recheck skipped</button><button id="reset">Reset new scan progress</button><button id="csv">Download CSV</button></p>
+<p id="status">Loading saved results…</p><progress id="bar" value="0" max="9999"></progress>
+<pre id="log">V8.5 keeps verified legacy results safe. It imports old local storage automatically.</pre>
+<small>Read-only public Ethereum RPC and metadata requests. No wallet, signature, private key or transaction is used.</small>
+<script>
+(()=>{'use strict';
+const CONTRACT='0x387c41b0b2f1128de44db1bcf8baad085f26392c',TOKEN_URI_SELECTOR='0xc87b56dd';
+const MAX=9999,CONCURRENCY=3,RPC_TIMEOUT=12000,META_TIMEOUT=15000;
+const KEY='argonauts_trait_scanner_v85';
+const OLD_KEYS=['argonauts_trait_scanner_v84','argonauts_trait_scanner_v83','argonauts_true_3_traits_v82','argonauts_v7'];
+const SEED=[65,138,172,331,544,1258,2280,2302,2400,2767,3477,3742,3999,4329,4486,4538,4605,4613,4670,4997,5838,5952,6012,6074,6272,6544,7035,7224,7349,7376,7390,7583,7676,7732,7748,7891,7898,8131,8203,8426,8460,8477,8575,8613,8778,8960,9144,9213,9439,9563,9661,9771,9978,9999];
+const REQUIRED=['bones','crown','palette','print'];
+const KNOWN=['bones','crown','palette','print','artifact','cloak','relic','sight'];
+const RPCS=['https://ethereum-rpc.publicnode.com','https://public.1rpc.io/eth','https://eth.llamarpc.com','https://rpc.mevblocker.io','https://eth.drpc.org'];
+const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const uniq=a=>Array.from(new Set((a||[]).map(Number).filter(n=>Number.isInteger(n)&&n>=1&&n<=MAX))).sort((a,b)=>a-b);
+function blank(){return {next:1,legacyThree:SEED.slice(),foundThree:[],foundFour:[],threeInfo:{},fourInfo:{},skipped:[],paused:false,rpc:0}}
+let state=blank(),running=false;
+function mergeOld(s){if(!s||typeof s!=='object')return;state.legacyThree=uniq([...(state.legacyThree||[]),...(s.legacyThree||[]),...(s.threeMatches||[]),...(s.matches||[])]);state.foundThree=uniq([...(state.foundThree||[]),...(s.foundThree||[])]);state.foundFour=uniq([...(state.foundFour||[]),...(s.foundFour||s.fourMatches||[])]);state.skipped=uniq([...(state.skipped||[]),...(s.skipped||[])]);state.threeInfo={...state.threeInfo,...(s.threeInfo||s.matchInfo||{})};state.fourInfo={...state.fourInfo,...(s.fourInfo||{})}}
+try{const cur=JSON.parse(localStorage.getItem(KEY));if(cur)mergeOld(cur);for(const k of OLD_KEYS){try{mergeOld(JSON.parse(localStorage.getItem(k)))}catch(e){}}}catch(e){}
+state.legacyThree=uniq(state.legacyThree);state.foundThree=uniq(state.foundThree.filter(id=>!state.legacyThree.includes(id)));state.foundFour=uniq(state.foundFour.filter(id=>!state.legacyThree.includes(id)));
+function save(){localStorage.setItem(KEY,JSON.stringify(state))}
+function threeAll(){return uniq([...(state.legacyThree||[]),...(state.foundThree||[])])}
+function setStatus(t,c=''){const e=$('status');e.textContent=t;e.className=c}
+function render(){const d=Math.min(MAX,Math.max(0,state.next-1));$('done').textContent=d;$('legacy').textContent=state.legacyThree.length;$('three').textContent=threeAll().length;$('four').textContent=state.foundFour.length;$('skipped').textContent=state.skipped.length;$('bar').value=d}
+function callData(id){return TOKEN_URI_SELECTOR+BigInt(id).toString(16).padStart(64,'0')}
+function timed(url,opts,ms){const c=new AbortController(),t=setTimeout(()=>c.abort(),ms);return fetch(url,{...opts,signal:c.signal}).finally(()=>clearTimeout(t))}
+async function rpcRaw(ep,id){const r=await timed(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id,method:'eth_call',params:[{to:CONTRACT,data:callData(id)},'latest']})},RPC_TIMEOUT);if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(j.error.message||'RPC error');if(!j.result||j.result==='0x')throw Error('empty result');return j.result}
+function decodeString(raw){const h=String(raw||'').replace(/^0x/,'');if(h.length<128||h.length%2)throw Error('bad ABI string');const off=Number(BigInt('0x'+h.slice(0,64)))*2;if(!Number.isSafeInteger(off)||off+64>h.length)throw Error('bad ABI offset');const len=Number(BigInt('0x'+h.slice(off,off+64))),start=off+64,end=start+len*2;if(!Number.isSafeInteger(len)||end>h.length)throw Error('bad ABI length');const a=new Uint8Array(len);for(let i=0;i<len;i++)a[i]=parseInt(h.slice(start+i*2,start+i*2+2),16);return new TextDecoder().decode(a)}
+async function tokenUri(id){const errors=[];for(let round=0;round<3;round++){for(let n=0;n<RPCS.length;n++){const idx=(state.rpc+n)%RPCS.length;try{const uri=decodeString(await rpcRaw(RPCS[idx],id));state.rpc=idx;return uri}catch(e){errors.push(new URL(RPCS[idx]).host+': '+e.message);await sleep(100+round*150)}}}throw Error(errors.slice(-5).join(' | '))}
+function urls(uri){if(uri.startsWith('data:application/json'))return [uri];if(uri.startsWith('ipfs://')){const p=uri.replace(/^ipfs:\/\/ipfs\//,'').replace(/^ipfs:\/\//,'');return ['https://nftstorage.link/ipfs/'+p,'https://gateway.pinata.cloud/ipfs/'+p,'https://ipfs.io/ipfs/'+p,'https://cloudflare-ipfs.com/ipfs/'+p]}return [uri]}
+async function getMeta(uri){if(uri.startsWith('data:application/json;base64,')){const b=uri.split(',')[1]||'';return JSON.parse(decodeURIComponent(escape(atob(b))))}if(uri.startsWith('data:application/json,'))return JSON.parse(decodeURIComponent(uri.slice(uri.indexOf(',')+1)));const errors=[];for(const u of urls(uri)){try{const r=await timed(u,{headers:{Accept:'application/json'}},META_TIMEOUT);if(!r.ok)throw Error('HTTP '+r.status);return await r.json()}catch(e){errors.push(u+' '+e.message)}}throw Error(errors.slice(-4).join(' | '))}
+function names(meta){const a=Array.isArray(meta&&meta.attributes)?meta.attributes:[];return new Set(a.map(x=>String((x&&x.trait_type)||'').trim().toLowerCase()).filter(x=>KNOWN.includes(x)))}
+function classify(ns){const present=REQUIRED.filter(t=>ns.has(t));const reason=present.join(' + ')+(ns.has('relic')?' + relic':'');if(present.length!==3)return {three:false,four:false,reason:reason||'not exact base 3'};if(ns.has('artifact')||ns.has('cloak')||ns.has('sight'))return {three:false,four:false,reason:'excluded trait present'};return {three:!ns.has('relic'),four:ns.has('relic'),reason}}
+async function check(id){return classify(names(await getMeta(await tokenUri(id))))}
+function unskip(id){state.skipped=state.skipped.filter(x=>x!==id)}
+function apply(id,r){unskip(id);if(state.legacyThree.includes(id))return;if(r.three){if(!state.foundThree.includes(id))state.foundThree.push(id);state.foundThree=uniq(state.foundThree);state.threeInfo[id]=r.reason}else{state.foundThree=state.foundThree.filter(x=>x!==id);delete state.threeInfo[id]}if(r.four){if(!state.foundFour.includes(id))state.foundFour.push(id);state.foundFour=uniq(state.foundFour);state.fourInfo[id]=r.reason}else{state.foundFour=state.foundFour.filter(x=>x!==id);delete state.fourInfo[id]}}
+function skip(id){if(!state.skipped.includes(id))state.skipped.push(id);state.skipped=uniq(state.skipped)}
+async function batch(ids){const out=await Promise.all(ids.map(async id=>{try{return {id,ok:true,r:await check(id)}}catch(e){return {id,ok:false,e:String(e.message||e)}}}));for(const x of out){if(x.ok)apply(x.id,x.r);else skip(x.id)}return out}
+async function normal(){while(state.next<=MAX&&!state.paused){const ids=[];while(ids.length<CONCURRENCY&&state.next<=MAX){const id=state.next++;if(!state.legacyThree.includes(id))ids.push(id)}if(ids.length){const out=await batch(ids);const bad=out.filter(x=>!x.ok).length;setStatus('Scanning '+Math.min(MAX,state.next-1)+'/'+MAX+' — 3-trait: '+threeAll().length+' — 4-trait + Relic: '+state.foundFour.length+(bad?' — temporary failures: '+bad:''),bad?'warn':'ok')}save();render();if((state.next-1)%100<CONCURRENCY)$('log').textContent='V8.5 metadata verification\n\nProgress: '+Math.min(MAX,state.next-1)+'/'+MAX+'\nLegacy verified 3-trait preserved: '+state.legacyThree.length+'\n3-trait total: '+threeAll().length+'\n4-trait + Relic: '+state.foundFour.length+'\nSkipped/unavailable: '+state.skipped.length+'\n\nThe legacy 54 can never be deleted by this scan.';await sleep(70)}}
+async function retry(){const ids=state.skipped.slice();if(!ids.length){setStatus('No skipped IDs to recheck.','ok');return}let i=0;while(i<ids.length&&!state.paused){const b=ids.slice(i,i+CONCURRENCY);await batch(b);i+=b.length;save();render();setStatus('Rechecking skipped '+i+'/'+ids.length+' — remaining: '+state.skipped.length,'warn');await sleep(150)}}
+async function start(){if(running)return;running=true;state.paused=false;$('start').disabled=true;try{if(state.next<=MAX)await normal();if(!state.paused&&state.next>MAX){save();render();setStatus('DONE — '+threeAll().length+' 3-trait matches and '+state.foundFour.length+' 4-trait + Relic matches. Skipped: '+state.skipped.length,'ok');$('log').textContent='DONE\n\n3-trait total: '+threeAll().length+'\n4-trait + Relic: '+state.foundFour.length+'\nSkipped/unavailable: '+state.skipped.length+'\n\nUse Recheck skipped for temporary RPC/IPFS failures.'}}catch(e){save();setStatus('PAUSED / ERROR — '+e.message,'bad')}finally{running=false;$('start').disabled=false;render()}}
+function reset(){if(!confirm('Reset only V8.5 progress and newly found results? The 54 legacy verified matches stay preserved.'))return;state=blank();save();render();setStatus('V8.5 progress reset. The 54 legacy verified matches are preserved.','ok');$('log').textContent='Ready. Start a new metadata-based scan.'}
+function download(){const rows=[['scanner','token_id','traits']];const v=$('view').value;if(v==='three'||v==='both')for(const id of threeAll())rows.push(['true_3_trait',id,state.threeInfo[id]||'verified legacy result']);if(v==='four'||v==='both')for(const id of state.foundFour)rows.push(['4_trait_relic',id,state.fourInfo[id]||'']);const csv=rows.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='argonauts_v85_'+v+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+$('start').onclick=start;$('pause').onclick=()=>{state.paused=true;save();setStatus('PAUSED — progress saved.','warn')};$('retry').onclick=async()=>{if(running)return;running=true;state.paused=false;try{await retry();save();render();if(!state.paused)setStatus('Recheck complete. Remaining skipped: '+state.skipped.length,state.skipped.length?'warn':'ok')}finally{running=false}};$('reset').onclick=reset;$('csv').onclick=download;
+render();save();setStatus('Ready — '+state.legacyThree.length+' legacy verified 3-trait matches preserved.','ok');
+})();
+</script>
+</body></html>
